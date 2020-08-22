@@ -14,7 +14,7 @@
 use std::result::Result;
 use std::sync::Arc;
 
-use crate::bus::{self, BusManager, MmioBus, MmioRange, PioBus, PioRange};
+use crate::bus::{self, BusManager, MmioAddress, MmioBus, MmioRange, PioAddress, PioBus, PioRange};
 use crate::resources::Resource;
 use crate::{DeviceMmio, DevicePio};
 
@@ -26,19 +26,19 @@ pub enum Error {
 }
 
 /// Implementing this trait provides PIO manager device operations.
-pub trait PioManager: BusManager<u16, <Self as PioManager>::D> {
+pub trait PioManager: BusManager<PioAddress, <Self as PioManager>::D> {
     type D: DevicePio;
 
-    fn pio_device(&self, addr: u16) -> Option<(&PioRange, &Self::D)> {
+    fn pio_device(&self, addr: PioAddress) -> Option<(&PioRange, &Self::D)> {
         self.bus().device(addr)
     }
 
-    fn pio_read(&self, addr: u16, data: &mut [u8]) -> Result<(), bus::Error> {
+    fn pio_read(&self, addr: PioAddress, data: &mut [u8]) -> Result<(), bus::Error> {
         self.check_access(addr, data.len())
             .map(|(range, device)| device.pio_read(range.base(), addr - range.base(), data))
     }
 
-    fn pio_write(&self, addr: u16, data: &[u8]) -> Result<(), bus::Error> {
+    fn pio_write(&self, addr: PioAddress, data: &[u8]) -> Result<(), bus::Error> {
         self.check_access(addr, data.len())
             .map(|(range, device)| device.pio_write(range.base(), addr - range.base(), data))
     }
@@ -47,25 +47,25 @@ pub trait PioManager: BusManager<u16, <Self as PioManager>::D> {
         self.bus_mut().register(range, device)
     }
 
-    fn unregister_pio(&mut self, addr: u16) -> Option<(PioRange, Self::D)> {
+    fn unregister_pio(&mut self, addr: PioAddress) -> Option<(PioRange, Self::D)> {
         self.bus_mut().unregister(addr)
     }
 }
 
 /// Implementing this trait provides MMIO manager device operations.
-pub trait MmioManager: BusManager<u64, <Self as MmioManager>::D> {
+pub trait MmioManager: BusManager<MmioAddress, <Self as MmioManager>::D> {
     type D: DeviceMmio;
 
-    fn mmio_device(&self, addr: u64) -> Option<(&MmioRange, &Self::D)> {
+    fn mmio_device(&self, addr: MmioAddress) -> Option<(&MmioRange, &Self::D)> {
         self.bus().device(addr)
     }
 
-    fn mmio_read(&self, addr: u64, data: &mut [u8]) -> Result<(), bus::Error> {
+    fn mmio_read(&self, addr: MmioAddress, data: &mut [u8]) -> Result<(), bus::Error> {
         self.check_access(addr, data.len())
             .map(|(range, device)| device.mmio_read(range.base(), addr - range.base(), data))
     }
 
-    fn mmio_write(&self, addr: u64, data: &[u8]) -> Result<(), bus::Error> {
+    fn mmio_write(&self, addr: MmioAddress, data: &[u8]) -> Result<(), bus::Error> {
         self.check_access(addr, data.len())
             .map(|(range, device)| device.mmio_write(range.base(), addr - range.base(), data))
     }
@@ -74,7 +74,7 @@ pub trait MmioManager: BusManager<u64, <Self as MmioManager>::D> {
         self.bus_mut().register(range, device)
     }
 
-    fn unregister_mmio(&mut self, addr: u64) -> Option<(MmioRange, Self::D)> {
+    fn unregister_mmio(&mut self, addr: MmioAddress) -> Option<(MmioRange, Self::D)> {
         self.bus_mut().unregister(addr)
     }
 }
@@ -88,7 +88,7 @@ pub struct IoManager {
     mmio_bus: MmioBus<Arc<dyn DeviceMmio>>,
 }
 
-impl BusManager<u16, Arc<dyn DevicePio>> for IoManager {
+impl BusManager<PioAddress, Arc<dyn DevicePio>> for IoManager {
     fn bus(&self) -> &PioBus<Arc<dyn DevicePio>> {
         &self.pio_bus
     }
@@ -98,7 +98,7 @@ impl BusManager<u16, Arc<dyn DevicePio>> for IoManager {
     }
 }
 
-impl BusManager<u64, Arc<dyn DeviceMmio>> for IoManager {
+impl BusManager<MmioAddress, Arc<dyn DeviceMmio>> for IoManager {
     fn bus(&self) -> &MmioBus<Arc<dyn DeviceMmio>> {
         &self.mmio_bus
     }
@@ -140,8 +140,11 @@ impl IoManager {
         for res in resources.iter() {
             match *res {
                 Resource::MmioAddressRange { base, size } => {
-                    self.register_mmio(MmioRange::new(base, size).unwrap(), device.clone())
-                        .map_err(Error::Bus)?;
+                    self.register_mmio(
+                        MmioRange::new(MmioAddress(base), size).unwrap(),
+                        device.clone(),
+                    )
+                    .map_err(Error::Bus)?;
                 }
                 _ => continue,
             }
@@ -167,8 +170,11 @@ impl IoManager {
         for res in resources.iter() {
             match *res {
                 Resource::PioAddressRange { base, size } => {
-                    self.register_pio(PioRange::new(base, size).unwrap(), device.clone())
-                        .map_err(Error::Bus)?;
+                    self.register_pio(
+                        PioRange::new(PioAddress(base), size).unwrap(),
+                        device.clone(),
+                    )
+                    .map_err(Error::Bus)?;
                 }
                 _ => continue,
             }
@@ -207,12 +213,12 @@ impl IoManager {
         for res in resources.iter() {
             match *res {
                 Resource::PioAddressRange { base, size: _ } => {
-                    if self.unregister_pio(base).is_some() {
+                    if self.unregister_pio(PioAddress(base)).is_some() {
                         count += 1;
                     }
                 }
                 Resource::MmioAddressRange { base, size: _ } => {
-                    if self.unregister_mmio(base).is_some() {
+                    if self.unregister_mmio(MmioAddress(base)).is_some() {
                         count += 1;
                     }
                 }
@@ -227,6 +233,7 @@ impl IoManager {
 mod tests {
     use super::*;
 
+    use bus::PioAddressInner;
     use std::sync::Mutex;
 
     const PIO_ADDRESS_SIZE: u16 = 4;
@@ -249,7 +256,7 @@ mod tests {
     }
 
     impl DevicePio for DummyDevice {
-        fn pio_read(&self, _base: u16, _offset: u16, data: &mut [u8]) {
+        fn pio_read(&self, _base: PioAddress, _offset: PioAddressInner, data: &mut [u8]) {
             if data.len() > 4 {
                 return;
             }
@@ -259,14 +266,14 @@ mod tests {
             }
         }
 
-        fn pio_write(&self, _base: u16, _offset: u16, data: &[u8]) {
+        fn pio_write(&self, _base: PioAddress, _offset: PioAddressInner, data: &[u8]) {
             let mut config = self.config.lock().expect("failed to acquire lock");
             *config = u32::from(data[0]) & 0xff;
         }
     }
 
     impl DeviceMmio for DummyDevice {
-        fn mmio_read(&self, _base: u64, _offset: u64, data: &mut [u8]) {
+        fn mmio_read(&self, _base: MmioAddress, _offset: u64, data: &mut [u8]) {
             if data.len() > 4 {
                 return;
             }
@@ -276,7 +283,7 @@ mod tests {
             }
         }
 
-        fn mmio_write(&self, _base: u64, _offset: u64, data: &[u8]) {
+        fn mmio_write(&self, _base: MmioAddress, _offset: u64, data: &[u8]) {
             let mut config = self.config.lock().expect("failed to acquire lock");
             *config = u32::from(data[0]) & 0xff;
         }
@@ -320,19 +327,26 @@ mod tests {
             .is_ok());
 
         let mut data = [0; 4];
-        assert!(io_mgr.mmio_read(MMIO_ADDRESS_BASE, &mut data).is_ok());
+        assert!(io_mgr
+            .mmio_read(MmioAddress(MMIO_ADDRESS_BASE), &mut data)
+            .is_ok());
         assert_eq!(data, [0x34, 0x12, 0, 0]);
 
         assert!(io_mgr
-            .mmio_read(MMIO_ADDRESS_BASE + MMIO_ADDRESS_SIZE, &mut data)
+            .mmio_read(
+                MmioAddress(MMIO_ADDRESS_BASE + MMIO_ADDRESS_SIZE),
+                &mut data
+            )
             .is_err());
 
         data = [0; 4];
-        assert!(io_mgr.mmio_write(MMIO_ADDRESS_BASE, &data).is_ok());
+        assert!(io_mgr
+            .mmio_write(MmioAddress(MMIO_ADDRESS_BASE), &data)
+            .is_ok());
         assert_eq!(*dum.config.lock().unwrap(), 0);
 
         assert!(io_mgr
-            .mmio_write(MMIO_ADDRESS_BASE + MMIO_ADDRESS_SIZE, &data)
+            .mmio_write(MmioAddress(MMIO_ADDRESS_BASE + MMIO_ADDRESS_SIZE), &data)
             .is_err());
     }
 
@@ -352,19 +366,23 @@ mod tests {
             .is_ok());
 
         let mut data = [0; 4];
-        assert!(io_mgr.pio_read(PIO_ADDRESS_BASE, &mut data).is_ok());
+        assert!(io_mgr
+            .pio_read(PioAddress(PIO_ADDRESS_BASE), &mut data)
+            .is_ok());
         assert_eq!(data, [0x34, 0x12, 0, 0]);
 
         assert!(io_mgr
-            .pio_read(PIO_ADDRESS_BASE + PIO_ADDRESS_SIZE, &mut data)
+            .pio_read(PioAddress(PIO_ADDRESS_BASE + PIO_ADDRESS_SIZE), &mut data)
             .is_err());
 
         data = [0; 4];
-        assert!(io_mgr.pio_write(PIO_ADDRESS_BASE, &data).is_ok());
+        assert!(io_mgr
+            .pio_write(PioAddress(PIO_ADDRESS_BASE), &data)
+            .is_ok());
         assert_eq!(*dum.config.lock().unwrap(), 0);
 
         assert!(io_mgr
-            .pio_write(PIO_ADDRESS_BASE + PIO_ADDRESS_SIZE, &data)
+            .pio_write(PioAddress(PIO_ADDRESS_BASE + PIO_ADDRESS_SIZE), &data)
             .is_err());
     }
 }

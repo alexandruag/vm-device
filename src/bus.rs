@@ -22,29 +22,50 @@ pub enum Error {
     InvalidRange,
 }
 
-/// An interval in the address space of a bus.
-#[derive(Copy, Clone)]
-pub struct BusRange<T> {
-    base: T,
-    size: T,
+pub trait BusAddress:
+    Add<<Self as BusAddress>::V, Output = Self>
+    + Copy
+    + Eq
+    + Ord
+    + Sub<Output = <Self as BusAddress>::V>
+{
+    type V: Add<Output = Self::V>
+        + Copy
+        + From<u8>
+        + PartialEq
+        + Ord
+        + Sub<Output = Self::V>
+        + TryFrom<usize>;
+
+    fn value(&self) -> Self::V;
+    fn checked_add(&self, Self::V) -> Option<Self>;
 }
 
-impl<T> BusRange<T>
-where
-    T: Add<Output = T> + Copy + From<u8> + PartialOrd + Sub<Output = T>,
-{
+/// An interval in the address space of a bus.
+#[derive(Copy, Clone)]
+pub struct BusRange<A: BusAddress> {
+    base: A,
+    size: A::V,
+}
+
+impl<A: BusAddress> BusRange<A> {
     /// Create a new range while checking for overflow.
-    pub fn new(base: T, size: T) -> Result<Self, Error> {
-        let sum = base + size;
-        if sum <= base && sum != 0.into() {
-            // It the above holds, then either `size == 0` or `base + size - 1` overflows.
+    pub fn new(base: A, size: A::V) -> Result<Self, Error> {
+        // A zero-length range is not valid.
+        if size == 0.into() {
             return Err(Error::InvalidRange);
         }
+
+        // Subtracting one, because a range that ends at the very edge of the address space
+        // is still valid.
+        base.checked_add(size - 1.into())
+            .ok_or(Error::InvalidRange)?;
+
         Ok(BusRange { base, size })
     }
 
     /// Create a new unit range (its size equals `1`).
-    pub fn new_unit(base: T) -> Self {
+    pub fn new_unit(base: A) -> Self {
         BusRange {
             base,
             size: 1.into(),
@@ -52,55 +73,162 @@ where
     }
 
     /// Return the base address of this range.
-    pub fn base(&self) -> T {
+    pub fn base(&self) -> A {
         self.base
     }
 
     /// Return the last bus address that's still part of the range.
-    pub fn last(&self) -> T {
-        self.base + self.size - 1.into()
+    pub fn last(&self) -> A {
+        self.base + (self.size - 1.into())
     }
 
     /// Check whether `self` and `other` overlap as intervals.
-    pub fn overlaps(&self, other: &BusRange<T>) -> bool {
+    pub fn overlaps(&self, other: &BusRange<A>) -> bool {
         self.base > other.last() || self.last() < other.base
     }
 }
 
-// We need implement the following traits so we can use `BusRange` values with `BTreeMap`s.
+// We need to implement the following traits so we can use `BusRange` values with `BTreeMap`s.
 // This usage scenario requires treating ranges as if they supported a total order, but that's
 // not really possible with intervals, so we write the implementations as if `BusRange`s were
 // solely determined by their base addresses, and apply extra checks in the `Bus` logic
 // that follows later.
-impl<T: PartialEq> PartialEq for BusRange<T> {
-    fn eq(&self, other: &BusRange<T>) -> bool {
+impl<A: BusAddress> PartialEq for BusRange<A> {
+    fn eq(&self, other: &BusRange<A>) -> bool {
         self.base == other.base
     }
 }
 
-impl<T: Eq> Eq for BusRange<T> {}
+impl<A: BusAddress> Eq for BusRange<A> {}
 
-impl<T: PartialOrd> PartialOrd for BusRange<T> {
-    fn partial_cmp(&self, other: &BusRange<T>) -> Option<Ordering> {
+impl<A: BusAddress> PartialOrd for BusRange<A> {
+    fn partial_cmp(&self, other: &BusRange<A>) -> Option<Ordering> {
         self.base.partial_cmp(&other.base)
     }
 }
 
-impl<T: Ord> Ord for BusRange<T> {
-    fn cmp(&self, other: &BusRange<T>) -> Ordering {
+impl<A: BusAddress> Ord for BusRange<A> {
+    fn cmp(&self, other: &BusRange<A>) -> Ordering {
         self.base.cmp(&other.base)
     }
 }
 
-pub type MmioRange = BusRange<u64>;
-pub type PioRange = BusRange<u16>;
+#[derive(Clone, Copy)]
+pub struct MmioAddress(pub u64);
 
-/// A bus that's agnostic to the range address type and device type.
-pub struct Bus<T, D> {
-    devices: BTreeMap<BusRange<T>, D>,
+#[cfg(target_arch = "x86_64")]
+pub type PioAddressInner = u16;
+#[cfg(target_arch = "aarch64")]
+pub type PioAddressInner = u32;
+
+#[derive(Clone, Copy)]
+pub struct PioAddress(pub PioAddressInner);
+
+impl PartialEq for MmioAddress {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
 }
 
-impl<T: Ord, D> Default for Bus<T, D> {
+impl Eq for MmioAddress {}
+
+impl PartialOrd for MmioAddress {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl Ord for MmioAddress {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl Add<u64> for MmioAddress {
+    type Output = Self;
+
+    fn add(self, rhs: u64) -> Self::Output {
+        MmioAddress(self.0 + rhs)
+    }
+}
+
+impl Sub for MmioAddress {
+    type Output = u64;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.0 - rhs.0
+    }
+}
+
+impl BusAddress for MmioAddress {
+    type V = u64;
+
+    fn value(&self) -> Self::V {
+        self.0
+    }
+
+    fn checked_add(&self, value: Self::V) -> Option<Self> {
+        self.0.checked_add(value).map(MmioAddress)
+    }
+}
+
+impl PartialEq for PioAddress {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for PioAddress {}
+
+impl PartialOrd for PioAddress {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl Ord for PioAddress {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl Add<PioAddressInner> for PioAddress {
+    type Output = Self;
+
+    fn add(self, rhs: PioAddressInner) -> Self::Output {
+        PioAddress(self.0 + rhs)
+    }
+}
+
+impl Sub for PioAddress {
+    type Output = PioAddressInner;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.0 - rhs.0
+    }
+}
+
+impl BusAddress for PioAddress {
+    type V = PioAddressInner;
+
+    fn value(&self) -> Self::V {
+        self.0
+    }
+
+    fn checked_add(&self, value: Self::V) -> Option<Self> {
+        self.0.checked_add(value).map(PioAddress)
+    }
+}
+
+pub type MmioRange = BusRange<MmioAddress>;
+pub type PioRange = BusRange<PioAddress>;
+
+/// A bus that's agnostic to the range address type and device type.
+pub struct Bus<A: BusAddress, D> {
+    devices: BTreeMap<BusRange<A>, D>,
+}
+
+impl<A: BusAddress, D> Default for Bus<A, D> {
     fn default() -> Self {
         Bus {
             devices: BTreeMap::new(),
@@ -108,17 +236,14 @@ impl<T: Ord, D> Default for Bus<T, D> {
     }
 }
 
-impl<T, D> Bus<T, D>
-where
-    T: Add<Output = T> + Copy + From<u8> + Ord + Sub<Output = T>,
-{
+impl<A: BusAddress, D> Bus<A, D> {
     /// Create an empty bus.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Return the registered range and device associated with `addr`.
-    pub fn device(&self, addr: T) -> Option<(&BusRange<T>, &D)> {
+    pub fn device(&self, addr: A) -> Option<(&BusRange<A>, &D)> {
         self.devices
             .range(..=BusRange::new_unit(addr))
             .nth_back(0)
@@ -127,7 +252,7 @@ where
 
     /// Return the registered range and a mutable reference to the device
     /// associated with `addr`.
-    pub fn device_mut(&mut self, addr: T) -> Option<(&BusRange<T>, &mut D)> {
+    pub fn device_mut(&mut self, addr: A) -> Option<(&BusRange<A>, &mut D)> {
         self.devices
             .range_mut(..=BusRange::new_unit(addr))
             .nth_back(0)
@@ -135,7 +260,7 @@ where
     }
 
     /// Register a device with the provided range.
-    pub fn register(&mut self, range: BusRange<T>, device: D) -> Result<(), Error> {
+    pub fn register(&mut self, range: BusRange<A>, device: D) -> Result<(), Error> {
         for r in self.devices.keys() {
             if range.overlaps(r) {
                 return Err(Error::DeviceOverlap);
@@ -150,29 +275,26 @@ where
     }
 
     /// Unregister the device associated with `addr`.
-    pub fn unregister(&mut self, addr: T) -> Option<(BusRange<T>, D)> {
+    pub fn unregister(&mut self, addr: A) -> Option<(BusRange<A>, D)> {
         let range = self.device(addr).map(|(range, _)| *range)?;
         self.devices.remove(&range).map(|device| (range, device))
     }
 }
 
-pub type MmioBus<D> = Bus<u64, D>;
-pub type PioBus<D> = Bus<u16, D>;
+pub type MmioBus<D> = Bus<MmioAddress, D>;
+pub type PioBus<D> = Bus<PioAddress, D>;
 
 /// Helper trait that can be implemented by types which hold one or more buses.
-pub trait BusManager<T, D>
-where
-    T: Add<Output = T> + Copy + From<u8> + Ord + Sub<Output = T> + TryFrom<usize>,
-{
+pub trait BusManager<A: BusAddress, D> {
     /// Return a reference to the inner bus.
-    fn bus(&self) -> &Bus<T, D>;
+    fn bus(&self) -> &Bus<A, D>;
 
     /// Return a mutable reference to the inner bus.
-    fn bus_mut(&mut self) -> &mut Bus<T, D>;
+    fn bus_mut(&mut self) -> &mut Bus<A, D>;
 
     /// Verify whether an access starting at `addr` with length `len` falls within any of
     /// the registered ranges. Return the range and a handle to the device when present.
-    fn check_access(&self, addr: T, len: usize) -> Result<(&BusRange<T>, &D), Error> {
+    fn check_access(&self, addr: A, len: usize) -> Result<(&BusRange<A>, &D), Error> {
         let size = len.try_into().map_err(|_| Error::InvalidAccessLength)?;
         let access_range = BusRange::new(addr, size).map_err(|_| Error::InvalidRange)?;
         self.bus()
